@@ -1,6 +1,6 @@
 <?php
 /**
- * Updated Newsletter Custom Post Type Class with better preview system
+ * Updated Newsletter Custom Post Type Class with auto-preview system
  * File: includes/class-newsletter-cpt.php
  */
 
@@ -19,9 +19,6 @@ class Newsletter_CPT {
         add_action('wp_before_admin_bar_render', array($this, 'modify_admin_bar'));
         add_action('admin_head', array($this, 'hide_publish_options_for_sent'));
         add_filter('wp_insert_post_data', array($this, 'prevent_status_change'), 10, 2);
-        
-        // Add query vars for preview tokens
-        add_action('init', array($this, 'add_query_vars'));
     }
     
     public function register_post_type() {
@@ -61,13 +58,6 @@ class Newsletter_CPT {
         );
         
         register_post_type('newsletter_campaign', $args);
-    }
-    
-    /**
-     * Add query vars for preview tokens
-     */
-    public function add_query_vars() {
-        add_rewrite_endpoint('preview_token', EP_PERMALINK);
     }
     
     public function add_meta_boxes() {
@@ -146,19 +136,26 @@ class Newsletter_CPT {
             echo '</div>';
         }
         
-        // Preview URL section
-        echo '<div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0; background: #f9f9f9;">';
-        echo '<p style="margin: 0 0 8px 0;"><strong>Preview Link:</strong></p>';
+        // View Online section - ALWAYS show regardless of status
+        echo '<div style="border: 1px solid #ddd; padding: 12px; margin: 10px 0; background: #f9f9f9; border-radius: 4px;">';
+        echo '<p style="margin: 0 0 8px 0; font-weight: bold; color: #333;">📧 View Online Link:</p>';
         
-        if ($post->post_status === 'publish') {
-            $preview_url = get_permalink($post->ID);
-            echo '<p style="margin: 0; font-size: 12px;">Public URL: <a href="' . esc_url($preview_url) . '" target="_blank">' . esc_url($preview_url) . '</a></p>';
+        $view_online_url = Newsletter_Email_Sender::get_view_online_url($post->ID);
+        $post_status = get_post_status($post->ID);
+        
+        if ($post_status === 'publish') {
+            echo '<div style="background: #e8f5e8; padding: 8px; border-radius: 3px; border-left: 3px solid #00a32a; margin-bottom: 8px;">';
+            echo '<p style="margin: 0; font-size: 12px; color: #006600;"><strong>✓ Published:</strong> Public URL is live</p>';
+            echo '</div>';
+            echo '<input type="text" value="' . esc_attr($view_online_url) . '" style="width: 100%; font-size: 11px; background: #fff;" readonly onclick="this.select();">';
         } else {
-            $preview_hash = Newsletter_Email_Sender::generate_preview_hash($post->ID);
-            $preview_url = get_permalink($post->ID) . '?preview_token=' . $preview_hash;
-            echo '<p style="margin: 0; font-size: 12px;">Draft preview: <a href="' . esc_url($preview_url) . '" target="_blank">View Preview</a></p>';
-            echo '<p style="margin: 5px 0 0 0; font-size: 11px; color: #666;">This secure link works for anyone and is included in test emails.</p>';
+            echo '<div style="background: #fff3cd; padding: 8px; border-radius: 3px; border-left: 3px solid #ffc107; margin-bottom: 8px;">';
+            echo '<p style="margin: 0; font-size: 12px; color: #856404;"><strong>⚠ Draft:</strong> Secure preview link (expires when published)</p>';
+            echo '</div>';
+            echo '<input type="text" value="' . esc_attr($view_online_url) . '" style="width: 100%; font-size: 11px; background: #fff;" readonly onclick="this.select();">';
         }
+        
+        echo '<p style="margin: 8px 0 0 0; font-size: 11px; color: #666;">This link is automatically included in all emails and works for anyone.</p>';
         echo '</div>';
         
         // Audience info
@@ -169,22 +166,24 @@ class Newsletter_CPT {
             echo '</div>';
         }
         
-        // Send button
+        // Send button section
         if ($selected_audience && $campaign_status !== 'sent' && $campaign_status !== 'sending') {
             echo '<div style="margin-top: 15px;">';
             
             // Test email section
-            echo '<div style="border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background: #f9f9f9;">';
-            echo '<p style="margin: 0 0 8px 0;"><strong>Send Test Email:</strong></p>';
-            echo '<input type="email" id="test_email" placeholder="test@example.com" style="width: 100%; margin-bottom: 5px;">';
-            echo '<button type="button" id="send_test_email" class="button button-secondary" style="width: 100%;">Send Test</button>';
+            echo '<div style="border: 1px solid #ddd; padding: 12px; margin-bottom: 15px; background: #f9f9f9; border-radius: 4px;">';
+            echo '<p style="margin: 0 0 8px 0; font-weight: bold; color: #333;">🧪 Send Test Email:</p>';
+            echo '<input type="email" id="test_email" placeholder="test@example.com" style="width: 100%; margin-bottom: 8px; padding: 6px;">';
+            echo '<button type="button" id="send_test_email" class="button button-secondary" style="width: 100%;">Send Test Email</button>';
+            echo '<p style="margin: 8px 0 0 0; font-size: 11px; color: #666;">Test emails include the view online link and show [TEST] or [DRAFT TEST] in subject.</p>';
             echo '</div>';
             
             // Main send section
-            echo '<div style="border-top: 2px solid #ddd; padding-top: 10px;">';
-            echo '<p style="margin: 0 0 10px 0; font-weight: bold;">Send to audience:</p>';
-            echo '<p style="margin: 0 0 10px 0; font-size: 12px; color: #666;">This will send the campaign to all ' . esc_html($audience->contact_count) . ' contacts in "' . esc_html($audience->name) . '". This action cannot be undone.</p>';
-            echo '<button type="button" id="send_campaign" class="button button-primary" style="width: 100%;">Send Campaign Now</button>';
+            echo '<div style="border: 2px solid #dc3232; padding: 12px; border-radius: 4px; background: #fef7f7;">';
+            echo '<p style="margin: 0 0 10px 0; font-weight: bold; color: #dc3232;">🚀 Send Campaign:</p>';
+            echo '<p style="margin: 0 0 10px 0; font-size: 12px; color: #666;">Send to all ' . esc_html($audience->contact_count) . ' contacts in "' . esc_html($audience->name) . '"</p>';
+            echo '<p style="margin: 0 0 12px 0; font-size: 11px; color: #d63638; font-weight: bold;">⚠ This will publish the campaign and cannot be undone!</p>';
+            echo '<button type="button" id="send_campaign" class="button button-primary" style="width: 100%; background: #dc3232; border-color: #dc3232;">Send Campaign Now</button>';
             echo '</div>';
             
             echo '</div>';
@@ -218,29 +217,38 @@ class Newsletter_CPT {
                     },
                     success: function(response) {
                         if (response.success) {
-                            alert('Test email sent successfully to ' + email + '\n\nThe email includes a preview link that allows viewing the newsletter online without login.');
+                            alert('✅ Test email sent successfully to ' + email + '!\n\nThe test email includes:\n• View online link that works without login\n• Subject line marked with [TEST] or [DRAFT TEST]\n• Full newsletter content as it will appear');
                             $('#test_email').val('');
                         } else {
-                            alert('Error: ' + response.data);
+                            alert('❌ Error: ' + response.data);
                         }
                     },
                     error: function() {
-                        alert('Error sending test email. Please try again.');
+                        alert('❌ Network error sending test email. Please try again.');
                     },
                     complete: function() {
-                        button.prop('disabled', false).text('Send Test');
+                        button.prop('disabled', false).text('Send Test Email');
                     }
                 });
             });
             
             // Send campaign
             $('#send_campaign').on('click', function() {
-                if (!confirm('Are you sure you want to send this campaign to all recipients? This cannot be undone.')) {
+                var confirmMsg = '🚨 FINAL CONFIRMATION\n\n';
+                confirmMsg += 'This will:\n';
+                confirmMsg += '• Publish this campaign (making it publicly visible)\n';
+                confirmMsg += '• Send to <?php echo esc_js($audience ? $audience->contact_count : 0); ?> contacts\n';
+                confirmMsg += '• Lock the campaign from further editing\n';
+                confirmMsg += '• Expire the preview link\n\n';
+                confirmMsg += 'This action CANNOT be undone.\n\n';
+                confirmMsg += 'Are you absolutely sure?';
+                
+                if (!confirm(confirmMsg)) {
                     return;
                 }
                 
                 var button = $(this);
-                button.prop('disabled', true).text('Sending Campaign...');
+                button.prop('disabled', true).text('Publishing & Sending...');
                 
                 $.ajax({
                     url: ajaxurl,
@@ -252,17 +260,17 @@ class Newsletter_CPT {
                     },
                     success: function(response) {
                         if (response.success) {
-                            alert('Campaign sent successfully to ' + response.data.sent_count + ' contacts!');
+                            alert('🎉 Campaign sent successfully!\n\n' + response.data.sent_count + ' emails sent to contacts.\n\nThe campaign is now published and locked from editing.');
                             location.reload();
                         } else {
-                            alert('Error: ' + response.data);
+                            alert('❌ Error: ' + response.data);
                         }
                     },
                     error: function() {
-                        alert('Error sending campaign. Please try again.');
+                        alert('❌ Network error sending campaign. Please try again.');
                     },
                     complete: function() {
-                        if (button.text() === 'Sending Campaign...') {
+                        if (button.text() === 'Publishing & Sending...') {
                             button.prop('disabled', false).text('Send Campaign Now');
                         }
                     }
@@ -346,10 +354,11 @@ class Newsletter_CPT {
                 $('#title').prop('readonly', true).css('background-color', '#f8f9fa');
                 
                 // Add notice
-                $('#titlediv').before('<div class="notice notice-info"><p><strong>This campaign has been sent and cannot be modified.</strong> All content is now locked.</p></div>');
+                $('#titlediv').before('<div class="notice notice-info"><p><strong>🔒 This campaign has been sent and is now locked.</strong> All content is permanently locked to preserve the integrity of the sent campaign.</p></div>');
                 
                 // Disable ACF fields
                 $('.acf-field input, .acf-field textarea, .acf-field select').prop('disabled', true);
+                $('.acf-field').css('opacity', '0.6');
             });
             </script>
             <?php
