@@ -19,6 +19,9 @@ class Newsletter_CPT {
         add_action('wp_before_admin_bar_render', array($this, 'modify_admin_bar'));
         add_action('admin_head', array($this, 'hide_publish_options_for_sent'));
         add_filter('wp_insert_post_data', array($this, 'prevent_status_change'), 10, 2);
+        
+        // Add query vars for preview tokens
+        add_action('init', array($this, 'add_query_vars'));
     }
     
     public function register_post_type() {
@@ -51,10 +54,20 @@ class Newsletter_CPT {
             'show_in_nav_menus' => false,
             'can_export' => true,
             'exclude_from_search' => true,
-            'rewrite' => array('slug' => 'newsletter-campaign')
+            'rewrite' => array(
+                'slug' => 'newsletter-campaign',
+                'with_front' => false
+            )
         );
         
         register_post_type('newsletter_campaign', $args);
+    }
+    
+    /**
+     * Add query vars for preview tokens
+     */
+    public function add_query_vars() {
+        add_rewrite_endpoint('preview_token', EP_PERMALINK);
     }
     
     public function add_meta_boxes() {
@@ -133,9 +146,24 @@ class Newsletter_CPT {
             echo '</div>';
         }
         
+        // Preview URL section
+        echo '<div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0; background: #f9f9f9;">';
+        echo '<p style="margin: 0 0 8px 0;"><strong>Preview Link:</strong></p>';
+        
+        if ($post->post_status === 'publish') {
+            $preview_url = get_permalink($post->ID);
+            echo '<p style="margin: 0; font-size: 12px;">Public URL: <a href="' . esc_url($preview_url) . '" target="_blank">' . esc_url($preview_url) . '</a></p>';
+        } else {
+            $preview_hash = Newsletter_Email_Sender::generate_preview_hash($post->ID);
+            $preview_url = get_permalink($post->ID) . '?preview_token=' . $preview_hash;
+            echo '<p style="margin: 0; font-size: 12px;">Draft preview: <a href="' . esc_url($preview_url) . '" target="_blank">View Preview</a></p>';
+            echo '<p style="margin: 5px 0 0 0; font-size: 11px; color: #666;">This secure link works for anyone and is included in test emails.</p>';
+        }
+        echo '</div>';
+        
         // Audience info
         if (!$audience) {
-            echo 'div style="margin-top: 10px;">';
+            echo '<div style="margin-top: 10px;">';
             echo '<p style="color: #d63638;"><strong>⚠ No audience selected</strong><br>';
             echo '<small>Please select an audience in Campaign Settings first.</small></p>';
             echo '</div>';
@@ -145,15 +173,11 @@ class Newsletter_CPT {
         if ($selected_audience && $campaign_status !== 'sent' && $campaign_status !== 'sending') {
             echo '<div style="margin-top: 15px;">';
             
-            // Test email section with shareable preview
+            // Test email section
             echo '<div style="border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background: #f9f9f9;">';
             echo '<p style="margin: 0 0 8px 0;"><strong>Send Test Email:</strong></p>';
             echo '<input type="email" id="test_email" placeholder="test@example.com" style="width: 100%; margin-bottom: 5px;">';
             echo '<button type="button" id="send_test_email" class="button button-secondary" style="width: 100%;">Send Test</button>';
-            
-            // Add note about preview links
-            $preview_hash = Newsletter_Email_Sender::generate_preview_hash($post->ID);
-            $secure_preview_url = get_permalink($post->ID) . '?preview_token=' . $preview_hash;
             echo '</div>';
             
             // Main send section
@@ -194,7 +218,7 @@ class Newsletter_CPT {
                     },
                     success: function(response) {
                         if (response.success) {
-                            alert('Test email sent successfully to ' + email + '\n\nThe email includes a preview link that allows viewing the newsletter online.');
+                            alert('Test email sent successfully to ' + email + '\n\nThe email includes a preview link that allows viewing the newsletter online without login.');
                             $('#test_email').val('');
                         } else {
                             alert('Error: ' + response.data);
@@ -301,24 +325,21 @@ class Newsletter_CPT {
         
         $is_sent = get_post_meta($post->ID, '_newsletter_campaign_status', true) === 'sent';
         $is_locked = get_post_meta($post->ID, '_newsletter_locked', true);
-        ?>
-                  <style>
+        
+        if ($is_sent && $is_locked) {
+            ?>
+            <style>
                 #misc-publishing-actions .misc-pub-post-status,
-                #misc-publishing-actions .misc-pub-visibility, #rank-math-lock-modified-date {
+                #misc-publishing-actions .misc-pub-visibility,
+                #rank-math-lock-modified-date {
                     display: none !important;
                 }
                 
                 #publishing-action #publish {
                     display: none;
                 }
-                
             </style>
             
-            <?php
-
-        if ($is_sent && $is_locked) {
-            ?>
-  
             <script>
             jQuery(document).ready(function($) {
                 // Disable title editing for sent campaigns

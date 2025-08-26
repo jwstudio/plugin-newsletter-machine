@@ -1,6 +1,6 @@
 <?php
 /**
- * Final Newsletter Email Sender Class with proper token handling
+ * Fixed Newsletter Email Sender Class with improved token handling
  * File: includes/class-newsletter-email-sender.php
  */
 
@@ -15,7 +15,13 @@ class Newsletter_Email_Sender {
      * This creates a consistent token that works for previewing drafts
      */
     public static function generate_preview_hash($campaign_id) {
-        $secret = wp_salt('nonce') . $campaign_id . get_post_field('post_date', $campaign_id);
+        // Use a combination of site-specific secret, campaign ID, and creation date
+        $campaign = get_post($campaign_id);
+        if (!$campaign) {
+            return false;
+        }
+        
+        $secret = wp_salt('nonce') . $campaign_id . $campaign->post_date;
         return substr(hash('sha256', $secret), 0, 16); // 16 character hash
     }
 
@@ -24,7 +30,33 @@ class Newsletter_Email_Sender {
      */
     public static function validate_preview_hash($campaign_id, $provided_hash) {
         $expected_hash = self::generate_preview_hash($campaign_id);
+        if (!$expected_hash) {
+            return false;
+        }
         return hash_equals($expected_hash, $provided_hash);
+    }
+
+    /**
+     * Get the correct view online URL based on campaign status
+     */
+    public static function get_view_online_url($campaign_id) {
+        $post_status = get_post_status($campaign_id);
+        
+        if ($post_status === 'publish') {
+            // Published campaigns - use public URL
+            return get_permalink($campaign_id);
+        } else {
+            // Draft campaigns - use secure preview URL
+            $preview_hash = self::generate_preview_hash($campaign_id);
+            $base_url = get_permalink($campaign_id);
+            
+            // Handle pretty permalinks vs plain permalinks
+            if (get_option('permalink_structure')) {
+                return $base_url . '?preview_token=' . $preview_hash;
+            } else {
+                return add_query_arg('preview_token', $preview_hash, $base_url);
+            }
+        }
     }
 
     /**
@@ -38,19 +70,11 @@ class Newsletter_Email_Sender {
             return false;
         }
         
-        // Determine the view online URL based on campaign status
-        $post_status = get_post_status($campaign_id);
-        
-        $view_online_text = 'View it online';
-        if ($post_status === 'publish') {
-            // Published campaigns - use public URL
-            $view_online_url = get_permalink($campaign_id);
-            //$view_online_text = 'View it online';
-        } else {
-            // Draft campaigns - use secure preview URL
-            $preview_hash = self::generate_preview_hash($campaign_id);
-            $view_online_url = get_permalink($campaign_id) . '?preview_token=' . $preview_hash;
-            //$view_online_text = $is_test ? 'Preview online (secure link)' : 'View it online';
+        if ($is_test && get_post_status($campaign_id) == 'publish') {
+            // Get the correct view online URL
+            $view_online_url = self::get_view_online_url($campaign_id);
+            $view_online_text = 'View it online';
+            $is_published = true;
         }
         
         // Start with proper email HTML structure
@@ -71,14 +95,18 @@ class Newsletter_Email_Sender {
                 
                 <!-- 600px email container -->
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="width: 600px; max-width: 600px; background-color: #ffffff; margin: 0 auto;">
-                    
+                    ';
+                    if ($is_published) {
+                    $html .= '
                     <!-- View Online Bar -->
                     <tr>
                         <td style="background-color: #f8f8f8; padding: 10px 20px; text-align: center; font-size: 12px; color: #666; border-bottom: 1px solid #ddd;">
                             Having trouble viewing this email? <a href="' . esc_url($view_online_url) . '" style="color: #0073aa; text-decoration: underline;">' . $view_online_text . '</a>
                         </td>
                     </tr>
-                    
+                    ';
+                    }
+                    $html .= '
                     <!-- Content blocks -->';
         
         // Process each content block using the existing renderer
@@ -88,7 +116,6 @@ class Newsletter_Email_Sender {
             $html .= '</td></tr>';
         }
         
-
         $html .= '
                     <!-- Email Footer -->
                     <tr>
@@ -97,12 +124,8 @@ class Newsletter_Email_Sender {
                                 <tr>
                                     <td style="padding: 20px; text-align: center; font-size: 14px; color: #666; line-height: 1.4;">
                                         <p style="margin: 0 0 10px 0;">© ' . date('Y') . ' ' . get_bloginfo('name') . '. All rights reserved.</p>
-        
-
-            <p style="margin: 0;"><a href="#unsubscribe" style="color: #666; text-decoration: underline;">Unsubscribe</a> | 
-                             <a href="' . esc_url($view_online_url) . '" style="color: #666; text-decoration: underline;">View Online</a></p>
-        
-        
+                                        <p style="margin: 0;"><a href="#unsubscribe" style="color: #666; text-decoration: underline;">Unsubscribe</a> | 
+                                         <a href="' . esc_url($view_online_url) . '" style="color: #666; text-decoration: underline;">View Online</a></p>
                                     </td>
                                 </tr>
                             </table>
