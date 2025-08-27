@@ -1,6 +1,6 @@
 <?php
 /**
- * Fixed Newsletter Email Sender Class with improved token handling
+ * Updated Newsletter Email Sender Class with auto-generated permanent preview links
  * File: includes/class-newsletter-email-sender.php
  */
 
@@ -11,17 +11,18 @@ if (!defined('ABSPATH')) {
 class Newsletter_Email_Sender {
     
     /**
-     * Generate a secure preview hash for draft campaigns
-     * This creates a consistent token that works for previewing drafts
+     * Generate a permanent preview hash for campaigns (similar to Public Post Preview plugin)
+     * This creates a consistent token that works until the campaign is published
      */
     public static function generate_preview_hash($campaign_id) {
-        // Use a combination of site-specific secret, campaign ID, and creation date
         $campaign = get_post($campaign_id);
         if (!$campaign) {
             return false;
         }
         
-        $secret = wp_salt('nonce') . $campaign_id . $campaign->post_date;
+        // Create a permanent hash based on campaign ID and site-specific salt
+        // This will be the same every time until the post is published
+        $secret = wp_salt('nonce') . '_newsletter_' . $campaign_id . '_' . $campaign->post_date;
         return substr(hash('sha256', $secret), 0, 16); // 16 character hash
     }
 
@@ -37,7 +38,18 @@ class Newsletter_Email_Sender {
     }
 
     /**
-     * Get the correct view online URL based on campaign status
+     * Check if a campaign is enabled for public preview
+     * Auto-enable for all draft campaigns, disable for published ones
+     */
+    public static function is_public_preview_enabled($campaign_id) {
+        $post_status = get_post_status($campaign_id);
+        
+        // Auto-enable preview for drafts, disable for published
+        return ($post_status === 'draft');
+    }
+
+    /**
+     * Get the view online URL - always return a URL regardless of status
      */
     public static function get_view_online_url($campaign_id) {
         $post_status = get_post_status($campaign_id);
@@ -46,21 +58,22 @@ class Newsletter_Email_Sender {
             // Published campaigns - use public URL
             return get_permalink($campaign_id);
         } else {
-            // Draft campaigns - use secure preview URL
+            // Draft campaigns - use secure preview URL with _npp parameter (like Public Post Preview)
             $preview_hash = self::generate_preview_hash($campaign_id);
             $base_url = get_permalink($campaign_id);
             
-            // Handle pretty permalinks vs plain permalinks
-            if (get_option('permalink_structure')) {
-                return $base_url . '?preview_token=' . $preview_hash;
-            } else {
-                return add_query_arg('preview_token', $preview_hash, $base_url);
-            }
+            // Use _npp parameter to match the style of Public Post Preview plugin
+            $preview_args = array(
+                'preview' => 'true',
+                '_npp' => $preview_hash
+            );
+            
+            return add_query_arg($preview_args, $base_url);
         }
     }
 
     /**
-     * Generate email HTML with correct view online links based on campaign status
+     * Generate email HTML with view online link always included
      */
     private static function generate_email_html($campaign_id, $is_test = false) {
         $campaign_title = get_post_field('post_title', $campaign_id);
@@ -70,12 +83,10 @@ class Newsletter_Email_Sender {
             return false;
         }
         
-        if ($is_test && get_post_status($campaign_id) == 'publish') {
-            // Get the correct view online URL
-            $view_online_url = self::get_view_online_url($campaign_id);
-            $view_online_text = 'View it online';
-            $is_published = true;
-        }
+        // Always get the view online URL regardless of status
+        $view_online_url = self::get_view_online_url($campaign_id);
+        $post_status = get_post_status($campaign_id);
+        $view_online_text = ($post_status === 'publish') ? 'View it online' : 'View online preview';
         
         // Start with proper email HTML structure
         $html = '<!DOCTYPE html>
@@ -95,18 +106,14 @@ class Newsletter_Email_Sender {
                 
                 <!-- 600px email container -->
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" style="width: 600px; max-width: 600px; background-color: #ffffff; margin: 0 auto;">
-                    ';
-                    if ($is_published) {
-                    $html .= '
-                    <!-- View Online Bar -->
+                    
+                    <!-- View Online Bar - Always show -->
                     <tr>
                         <td style="background-color: #f8f8f8; padding: 10px 20px; text-align: center; font-size: 12px; color: #666; border-bottom: 1px solid #ddd;">
                             Having trouble viewing this email? <a href="' . esc_url($view_online_url) . '" style="color: #0073aa; text-decoration: underline;">' . $view_online_text . '</a>
                         </td>
                     </tr>
-                    ';
-                    }
-                    $html .= '
+                    
                     <!-- Content blocks -->';
         
         // Process each content block using the existing renderer
@@ -125,7 +132,7 @@ class Newsletter_Email_Sender {
                                     <td style="padding: 20px; text-align: center; font-size: 14px; color: #666; line-height: 1.4;">
                                         <p style="margin: 0 0 10px 0;">© ' . date('Y') . ' ' . get_bloginfo('name') . '. All rights reserved.</p>
                                         <p style="margin: 0;"><a href="#unsubscribe" style="color: #666; text-decoration: underline;">Unsubscribe</a> | 
-                                         <a href="' . esc_url($view_online_url) . '" style="color: #666; text-decoration: underline;">View Online</a></p>
+                                         <a href="' . esc_url($view_online_url) . '" style="color: #666; text-decoration: underline;">' . $view_online_text . '</a></p>
                                     </td>
                                 </tr>
                             </table>
@@ -157,7 +164,8 @@ class Newsletter_Email_Sender {
             return false;
         }
         
-        $subject = '[TEST] ' . $campaign_title;
+        $subject_prefix = '[TEST] ';
+        $subject = $subject_prefix . $campaign_title;
         
         // Set headers for HTML email
         $headers = array(
@@ -184,7 +192,7 @@ class Newsletter_Email_Sender {
         }
         
         // PUBLISH THE CAMPAIGN BEFORE SENDING
-        // This ensures that view online links in emails work properly
+        // This ensures that view online links in emails work properly and preview links expire
         $campaign_post = array(
             'ID' => $campaign_id,
             'post_status' => 'publish'

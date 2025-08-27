@@ -1,6 +1,6 @@
 <?php
 /**
- * Robust Newsletter_Public class that properly handles draft access with tokens
+ * Updated Newsletter_Public class with auto-preview system (no expiration)
  * File: includes/class-newsletter-public.php
  */
 
@@ -11,209 +11,231 @@ if (!defined('ABSPATH')) {
 class Newsletter_Public {
     
     public function __construct() {
-        // Hook early to intercept WordPress query processing
-        add_action('parse_request', array($this, 'handle_newsletter_preview_access'), 1);
-        add_filter('posts_results', array($this, 'allow_draft_with_token'), 10, 2);
+        // Add query var for our preview parameter
+        add_filter('query_vars', array($this, 'add_query_var'));
+        
+        // Hook into the main query to handle preview access
+        add_action('pre_get_posts', array($this, 'show_public_preview'));
+        
+        // Filter posts results to handle draft access
+        add_filter('posts_results', array($this, 'set_post_to_publish'), 10, 2);
         
         // Template filters
         add_filter('single_template', array($this, 'load_newsletter_template'));
         add_filter('template_include', array($this, 'load_newsletter_template_fallback'));
         
-        // Handle access control
-        add_action('template_redirect', array($this, 'check_campaign_access'));
+        // Add no-cache headers for preview
+        add_action('wp_head', array($this, 'add_preview_headers'));
         
         add_action('wp_enqueue_scripts', array($this, 'enqueue_public_assets'));
-        
-        // Override WordPress's default behavior for our post type
-        add_filter('pre_get_posts', array($this, 'modify_newsletter_query'));
     }
     
     /**
-     * Modify the main query to allow draft newsletter campaigns with valid tokens
+     * Add query var for _npp (newsletter public preview)
      */
-    public function modify_newsletter_query($query) {
-        // Only affect main query on frontend for single newsletter campaigns
+    public function add_query_var($qv) {
+        $qv[] = '_npp';
+        return $qv;
+    }
+    
+    /**
+     * Show public preview when conditions are met
+     */
+    public function show_public_preview($query) {
+        // Only handle main query on frontend
         if (is_admin() || !$query->is_main_query()) {
             return;
         }
         
-        // Check if this is a newsletter campaign request
-        if ($query->get('post_type') === 'newsletter_campaign' || 
-            (isset($query->query_vars['name']) && $this->is_newsletter_url_pattern())) {
+        // Check if this is a preview request for our post type
+        if ($query->is_preview() && 
+            $query->is_singular() && 
+            ($query->get('post_type') === 'newsletter_campaign' || 
+             $this->is_newsletter_request($query)) &&
+            get_query_var('_npp')) {
             
-            // If we have a preview token, allow draft posts
-            if (isset($_GET['preview_token'])) {
-                $query->set('post_status', array('publish', 'draft'));
+            // Add no-cache headers
+            if (!headers_sent()) {
+                nocache_headers();
+                header('X-Robots-Tag: noindex');
             }
+            
+            // Add filter to handle the post
+            add_filter('posts_results', array($this, 'set_post_to_publish'), 10, 2);
         }
     }
     
     /**
-     * Check if the current URL pattern matches newsletter campaigns
+     * Check if this is a newsletter campaign request
      */
-    private function is_newsletter_url_pattern() {
-        $request_uri = $_SERVER['REQUEST_URI'] ?? '';
-        return strpos($request_uri, '/newsletter-campaign/') !== false;
-    }
-    
-    /**
-     * Handle preview access at the parse_request level
-     */
-    public function handle_newsletter_preview_access($wp) {
-        // Check if this is a newsletter campaign with preview token
-        if (!isset($_GET['preview_token'])) {
-            return;
+    private function is_newsletter_request($query) {
+        // Check various ways the query might indicate a newsletter campaign
+        if ($query->get('post_type') === 'newsletter_campaign') {
+            return true;
         }
         
-        // Look for newsletter campaign in the request
-        if (isset($wp->query_vars['post_type']) && $wp->query_vars['post_type'] === 'newsletter_campaign') {
-            // Allow draft access for this request
-            $wp->query_vars['post_status'] = array('publish', 'draft');
-        } elseif (isset($wp->query_vars['name']) && $this->is_newsletter_url_pattern()) {
-            // This might be a pretty permalink request
-            $wp->query_vars['post_type'] = 'newsletter_campaign';
-            $wp->query_vars['post_status'] = array('publish', 'draft');
+        // Check if the name/slug suggests it's a newsletter
+        $name = $query->get('name');
+        if ($name) {
+            $post = get_posts(array(
+                'name' => $name,
+                'post_type' => 'newsletter_campaign',
+                'post_status' => array('draft', 'publish'),
+                'numberposts' => 1
+            ));
+            return !empty($post);
         }
+        
+        // Check by ID
+        $p = $query->get('p');
+        if ($p) {
+            $post = get_post($p);
+            return ($post && $post->post_type === 'newsletter_campaign');
+        }
+        
+        return false;
     }
     
     /**
-     * Filter posts results to allow draft campaigns with valid tokens
+     * Check if public preview is available
      */
-    public function allow_draft_with_token($posts, $query) {
-        // Only process single newsletter campaign queries
-        if (!$query->is_main_query() || is_admin() || 
-            !$query->is_singular() || 
-            $query->get('post_type') !== 'newsletter_campaign') {
+    private function is_public_preview_available($post_id) {
+        if (empty($post_id)) {
+            return false;
+        }
+        
+        $post = get_post($post_id);
+        if (!$post || $post->post_type !== 'newsletter_campaign') {
+            return false;
+        }
+        
+        // Only allow preview for drafts
+        if ($post->post_status !== 'draft') {
+            return false;
+        }
+        
+        // Verify the nonce
+        $provided_nonce = get_query_var('_npp');
+        if (!$provided_nonce) {
+            return false;
+        }
+        
+        return Newsletter_Email_Sender::validate_preview_hash($post_id, $provided_nonce);
+    }
+    
+    /**
+     * Set post to publish for valid preview requests
+     */
+    public function set_post_to_publish($posts, $query) {
+        // Remove filter to prevent infinite loops
+        remove_filter('posts_results', array($this, 'set_post_to_publish'), 10);
+        
+        // Only handle main query on frontend
+        if (is_admin() || !$query->is_main_query()) {
             return $posts;
         }
         
-        // If no posts found and we have a preview token, try to find draft
-        if (empty($posts) && isset($_GET['preview_token'])) {
-            $token = sanitize_text_field($_GET['preview_token']);
+        // Must be a preview request
+        if (!$query->is_preview() || !$query->is_singular()) {
+            return $posts;
+        }
+        
+        // Must have our preview parameter
+        if (!get_query_var('_npp')) {
+            return $posts;
+        }
+        
+        // Handle empty posts (draft not found in initial query)
+        if (empty($posts)) {
+            $post_id = null;
             
-            // Try to find the campaign by name (for pretty permalinks)
+            // Try to find by name
             if ($query->get('name')) {
-                $draft_posts = get_posts(array(
+                $found_posts = get_posts(array(
                     'name' => $query->get('name'),
                     'post_type' => 'newsletter_campaign',
                     'post_status' => 'draft',
                     'numberposts' => 1
                 ));
-                
-                if (!empty($draft_posts)) {
-                    $campaign = $draft_posts[0];
-                    
-                    // Validate the token
-                    if (Newsletter_Email_Sender::validate_preview_hash($campaign->ID, $token)) {
-                        // Token is valid - return the draft post
-                        return array($campaign);
-                    }
+                if (!empty($found_posts)) {
+                    $posts = $found_posts;
+                    $post_id = $found_posts[0]->ID;
                 }
             }
             
-            // Try to find by ID if name lookup failed
-            if ($query->get('p')) {
-                $campaign_id = intval($query->get('p'));
-                $campaign = get_post($campaign_id);
-                
-                if ($campaign && $campaign->post_type === 'newsletter_campaign' && $campaign->post_status === 'draft') {
-                    if (Newsletter_Email_Sender::validate_preview_hash($campaign_id, $token)) {
-                        return array($campaign);
-                    }
+            // Try to find by ID
+            if (empty($posts) && $query->get('p')) {
+                $p = intval($query->get('p'));
+                $post = get_post($p);
+                if ($post && $post->post_type === 'newsletter_campaign' && $post->post_status === 'draft') {
+                    $posts = array($post);
+                    $post_id = $post->ID;
                 }
             }
+        } else {
+            // Posts found, get the first one
+            $post_id = $posts[0]->ID;
+        }
+        
+        // Validate access
+        if ($post_id && $this->is_public_preview_available($post_id)) {
+            // Set post status to publish so it's visible
+            if (!empty($posts)) {
+                $posts[0]->post_status = 'publish';
+                
+                // Disable comments and pings
+                add_filter('comments_open', '__return_false');
+                add_filter('pings_open', '__return_false');
+                
+                // Add preview indicator
+                add_action('wp_head', array($this, 'add_preview_indicator'));
+            }
+        } elseif (!empty($posts)) {
+            // Invalid or missing preview token
+            $this->show_access_denied($post_id);
         }
         
         return $posts;
     }
     
     /**
-     * Check if user can access the campaign - now more permissive
+     * Add preview headers for no-cache and no-index
      */
-    public function check_campaign_access() {
-        if (!is_singular('newsletter_campaign')) {
-            return;
+    public function add_preview_headers() {
+        if (is_singular('newsletter_campaign') && get_query_var('_npp')) {
+            echo '<meta name="robots" content="noindex, nofollow">' . "\n";
         }
-        
-        global $post;
-        
-        // Published campaigns - everyone can access
-        if ($post->post_status === 'publish') {
-            return;
-        }
-        
-        // For draft campaigns
-        if ($post->post_status === 'draft') {
-            
-            // First check for preview token (highest priority)
-            if (isset($_GET['preview_token'])) {
-                $provided_token = sanitize_text_field($_GET['preview_token']);
-                $is_valid = Newsletter_Email_Sender::validate_preview_hash($post->ID, $provided_token);
-                
-                if ($is_valid) {
-                    // Valid token - allow access
-                    return;
-                }
-            }
-            
-            // Check if user is admin/editor (second priority)
-            if (current_user_can('edit_posts')) {
-                return;
-            }
-            
-            // Check for WordPress preview parameter (for admin preview)
-            if (isset($_GET['preview']) && current_user_can('edit_post', $post->ID)) {
-                return;
-            }
-            
-            // No access - show error
-            $this->show_access_denied($post->ID);
-        }
-        
-        // Any other status - block access
-        $this->show_not_available();
     }
     
     /**
-     * Show access denied message with debug info
+     * Add preview indicator (for debugging)
+     */
+    public function add_preview_indicator() {
+        if (current_user_can('manage_options')) {
+            echo '<!-- Newsletter Preview Mode Active -->' . "\n";
+        }
+    }
+    
+    /**
+     * Show access denied message or redirect for published campaigns
      */
     private function show_access_denied($campaign_id = null) {
-        $debug_info = '';
-        
-        if (current_user_can('manage_options') && $campaign_id) {
-            $provided_token = isset($_GET['preview_token']) ? sanitize_text_field($_GET['preview_token']) : 'none';
-            $expected_token = Newsletter_Email_Sender::generate_preview_hash($campaign_id);
-            
-            $debug_info = '<hr><p style="background: #f0f0f0; padding: 10px; font-family: monospace; font-size: 12px;">
-                <strong>Debug Info (admin only):</strong><br>
-                Campaign ID: ' . $campaign_id . '<br>
-                Provided Token: ' . $provided_token . '<br>
-                Expected Token: ' . $expected_token . '<br>
-                Match: ' . (hash_equals($expected_token, $provided_token) ? 'Yes' : 'No') . '
-                </p>';
+        // Check if this campaign is published - if so, redirect to public URL
+        if ($campaign_id) {
+            $post_status = get_post_status($campaign_id);
+            if ($post_status === 'publish') {
+                wp_safe_redirect(get_permalink($campaign_id), 301);
+                exit;
+            }
         }
         
         wp_die(
             '<h1>Newsletter Preview Access Required</h1>
-            <p>This newsletter is still in draft mode and requires a valid preview link to access.</p>
-            <p>If you have a preview link from an email, please make sure you\'re using the complete URL including the preview token.</p>
-            ' . $debug_info . '
-            <p><a href="' . home_url() . '">← Return to website</a></p>',
-            'Newsletter Access Denied',
+            <p>This newsletter is in draft mode and requires a valid preview link to access.</p>
+            <p>If you received a preview link in an email, please make sure you\'re using the complete URL.</p>
+            <p><a href="' . home_url() . '" style="text-decoration: none; background: #0073aa; color: white; padding: 10px 20px; border-radius: 3px; display: inline-block;">← Return to website</a></p>',
+            'Newsletter Access Required',
             array('response' => 403)
-        );
-    }
-    
-    /**
-     * Show not available message
-     */
-    private function show_not_available() {
-        wp_die(
-            '<h1>Newsletter Not Available</h1>
-            <p>This newsletter is not available for viewing.</p>
-            <p><a href="' . home_url() . '">← Return to website</a></p>',
-            'Newsletter Not Available',
-            array('response' => 404)
         );
     }
     

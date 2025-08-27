@@ -1,6 +1,6 @@
 <?php
 /**
- * Updated Newsletter Custom Post Type Class with better preview system
+ * Updated Newsletter Custom Post Type Class with auto-preview system
  * File: includes/class-newsletter-cpt.php
  */
 
@@ -18,10 +18,8 @@ class Newsletter_CPT {
         // Add hooks to prevent unpublishing sent campaigns
         add_action('wp_before_admin_bar_render', array($this, 'modify_admin_bar'));
         add_action('admin_head', array($this, 'hide_publish_options_for_sent'));
+        add_action('admin_head', array($this, 'hide_publish_button_and_add_send'));
         add_filter('wp_insert_post_data', array($this, 'prevent_status_change'), 10, 2);
-        
-        // Add query vars for preview tokens
-        add_action('init', array($this, 'add_query_vars'));
     }
     
     public function register_post_type() {
@@ -61,13 +59,6 @@ class Newsletter_CPT {
         );
         
         register_post_type('newsletter_campaign', $args);
-    }
-    
-    /**
-     * Add query vars for preview tokens
-     */
-    public function add_query_vars() {
-        add_rewrite_endpoint('preview_token', EP_PERMALINK);
     }
     
     public function add_meta_boxes() {
@@ -146,20 +137,6 @@ class Newsletter_CPT {
             echo '</div>';
         }
         
-        // Preview URL section
-        echo '<div style="border: 1px solid #ddd; padding: 10px; margin: 10px 0; background: #f9f9f9;">';
-        echo '<p style="margin: 0 0 8px 0;"><strong>Preview Link:</strong></p>';
-        
-        if ($post->post_status === 'publish') {
-            $preview_url = get_permalink($post->ID);
-            echo '<p style="margin: 0; font-size: 12px;">Public URL: <a href="' . esc_url($preview_url) . '" target="_blank">' . esc_url($preview_url) . '</a></p>';
-        } else {
-            $preview_hash = Newsletter_Email_Sender::generate_preview_hash($post->ID);
-            $preview_url = get_permalink($post->ID) . '?preview_token=' . $preview_hash;
-            echo '<p style="margin: 0; font-size: 12px;">Draft preview: <a href="' . esc_url($preview_url) . '" target="_blank">View Preview</a></p>';
-            echo '<p style="margin: 5px 0 0 0; font-size: 11px; color: #666;">This secure link works for anyone and is included in test emails.</p>';
-        }
-        echo '</div>';
         
         // Audience info
         if (!$audience) {
@@ -169,22 +146,15 @@ class Newsletter_CPT {
             echo '</div>';
         }
         
-        // Send button
+        // Send button section
         if ($selected_audience && $campaign_status !== 'sent' && $campaign_status !== 'sending') {
             echo '<div style="margin-top: 15px;">';
             
             // Test email section
-            echo '<div style="border: 1px solid #ddd; padding: 10px; margin-bottom: 10px; background: #f9f9f9;">';
-            echo '<p style="margin: 0 0 8px 0;"><strong>Send Test Email:</strong></p>';
-            echo '<input type="email" id="test_email" placeholder="test@example.com" style="width: 100%; margin-bottom: 5px;">';
-            echo '<button type="button" id="send_test_email" class="button button-secondary" style="width: 100%;">Send Test</button>';
-            echo '</div>';
-            
-            // Main send section
-            echo '<div style="border-top: 2px solid #ddd; padding-top: 10px;">';
-            echo '<p style="margin: 0 0 10px 0; font-weight: bold;">Send to audience:</p>';
-            echo '<p style="margin: 0 0 10px 0; font-size: 12px; color: #666;">This will send the campaign to all ' . esc_html($audience->contact_count) . ' contacts in "' . esc_html($audience->name) . '". This action cannot be undone.</p>';
-            echo '<button type="button" id="send_campaign" class="button button-primary" style="width: 100%;">Send Campaign Now</button>';
+            echo '<div style="margin-bottom: 15px;">';
+            echo '<p style="margin: 0 0 8px 0; font-weight: bold;">Send Test Email:</p>';
+            echo '<input type="email" id="test_email" placeholder="test@example.com" style="width: 100%; margin-bottom: 8px; padding: 6px;">';
+            echo '<button type="button" id="send_test_email" class="button button-secondary" style="width: 100%;">Send Test Email</button>';
             echo '</div>';
             
             echo '</div>';
@@ -218,7 +188,7 @@ class Newsletter_CPT {
                     },
                     success: function(response) {
                         if (response.success) {
-                            alert('Test email sent successfully to ' + email + '\n\nThe email includes a preview link that allows viewing the newsletter online without login.');
+                            alert('Test email sent successfully to ' + email);
                             $('#test_email').val('');
                         } else {
                             alert('Error: ' + response.data);
@@ -228,19 +198,19 @@ class Newsletter_CPT {
                         alert('Error sending test email. Please try again.');
                     },
                     complete: function() {
-                        button.prop('disabled', false).text('Send Test');
+                        button.prop('disabled', false).text('Send Test Email');
                     }
                 });
             });
             
-            // Send campaign
+            // Send campaign - remove the complex confirmation
             $('#send_campaign').on('click', function() {
-                if (!confirm('Are you sure you want to send this campaign to all recipients? This cannot be undone.')) {
+                if (!confirm('Send this campaign to all recipients?')) {
                     return;
                 }
                 
                 var button = $(this);
-                button.prop('disabled', true).text('Sending Campaign...');
+                button.prop('disabled', true).text('Sending...');
                 
                 $.ajax({
                     url: ajaxurl,
@@ -262,8 +232,8 @@ class Newsletter_CPT {
                         alert('Error sending campaign. Please try again.');
                     },
                     complete: function() {
-                        if (button.text() === 'Sending Campaign...') {
-                            button.prop('disabled', false).text('Send Campaign Now');
+                        if (button.text() === 'Sending...') {
+                            button.prop('disabled', false).text('Send Campaign');
                         }
                     }
                 });
@@ -291,6 +261,126 @@ class Newsletter_CPT {
         }
     }
     
+    /**
+     * Hide publish button for newsletter campaigns and add send button
+     */
+    public function hide_publish_button_and_add_send() {
+        global $post;
+        
+        if (!$post || $post->post_type !== 'newsletter_campaign') {
+            return;
+        }
+        
+        $campaign_status = get_post_meta($post->ID, '_newsletter_campaign_status', true);
+        $is_sent = ($campaign_status === 'sent');
+        
+        if (!$is_sent) {
+            ?>
+            <script>
+            jQuery(document).ready(function($) {
+                // Hide the publish button
+                $('#publish').hide();
+                
+                // Add send campaign button to publish box
+                var selected_audience = $('select[name="newsletter_audience"]').val();
+                if (selected_audience) {
+                    var audience_text = $('select[name="newsletter_audience"] option:selected').text();
+                    var sendButton = '<input type="button" id="publish_send_campaign" class="button button-primary button-large" value="Send Campaign" style="width: 100%;">';
+                    $('#publishing-action').html(sendButton);
+                    
+                    // Handle send campaign click
+                    $(document).on('click', '#publish_send_campaign', function() {
+                        if (!confirm('Send this campaign to all contacts in "' + audience_text + '"?')) {
+                            return;
+                        }
+                        
+                        var button = $(this);
+                        button.prop('disabled', true).val('Sending...');
+                        
+                        $.ajax({
+                            url: ajaxurl,
+                            type: 'POST',
+                            data: {
+                                action: 'newsletter_send_campaign',
+                                campaign_id: <?php echo intval($post->ID); ?>,
+                                nonce: '<?php echo wp_create_nonce('newsletter_send_campaign'); ?>'
+                            },
+                            success: function(response) {
+                                if (response.success) {
+                                    alert('Campaign sent successfully to ' + response.data.sent_count + ' contacts!');
+                                    location.reload();
+                                } else {
+                                    alert('Error: ' + response.data);
+                                }
+                            },
+                            error: function() {
+                                alert('Error sending campaign. Please try again.');
+                            },
+                            complete: function() {
+                                if (button.val() === 'Sending...') {
+                                    button.prop('disabled', false).val('Send Campaign');
+                                }
+                            }
+                        });
+                    });
+                } else {
+                    $('#publishing-action').html('<p style="color: #d63638; margin: 10px 0;">Select an audience first</p>');
+                }
+                
+                // Update send button when audience changes
+                $('select[name="newsletter_audience"]').on('change', function() {
+                    var selected_audience = $(this).val();
+                    var selected_text = $(this).find('option:selected').text();
+                    
+                    if (selected_audience) {
+                        var sendButton = '<input type="button" id="publish_send_campaign" class="button button-primary button-large" value="Send Campaign" style="width: 100%;">';
+                        $('#publishing-action').html(sendButton);
+                        
+                        // Re-bind the click handler for the new button
+                        $(document).off('click', '#publish_send_campaign').on('click', '#publish_send_campaign', function() {
+                            if (!confirm('Send this campaign to all contacts in "' + selected_text + '"?')) {
+                                return;
+                            }
+                            
+                            var button = $(this);
+                            button.prop('disabled', true).val('Sending...');
+                            
+                            $.ajax({
+                                url: ajaxurl,
+                                type: 'POST',
+                                data: {
+                                    action: 'newsletter_send_campaign',
+                                    campaign_id: <?php echo intval($post->ID); ?>,
+                                    nonce: '<?php echo wp_create_nonce('newsletter_send_campaign'); ?>'
+                                },
+                                success: function(response) {
+                                    if (response.success) {
+                                        alert('Campaign sent successfully to ' + response.data.sent_count + ' contacts!');
+                                        location.reload();
+                                    } else {
+                                        alert('Error: ' + response.data);
+                                    }
+                                },
+                                error: function() {
+                                    alert('Error sending campaign. Please try again.');
+                                },
+                                complete: function() {
+                                    if (button.val() === 'Sending...') {
+                                        button.prop('disabled', false).val('Send Campaign');
+                                    }
+                                }
+                            });
+                        });
+                    } else {
+                        $('#publishing-action').html('<p style="color: #d63638; margin: 10px 0;">Select an audience first</p>');
+                    }
+                });
+            });
+            </script>
+            <?php
+        }
+    }
+
     /**
      * Prevent changing status of sent campaigns
      */
@@ -346,10 +436,11 @@ class Newsletter_CPT {
                 $('#title').prop('readonly', true).css('background-color', '#f8f9fa');
                 
                 // Add notice
-                $('#titlediv').before('<div class="notice notice-info"><p><strong>This campaign has been sent and cannot be modified.</strong> All content is now locked.</p></div>');
+                $('#titlediv').before('<div class="notice notice-info"><p><strong>This campaign has been sent and is now locked.</strong> All content is permanently locked.</p></div>');
                 
                 // Disable ACF fields
                 $('.acf-field input, .acf-field textarea, .acf-field select').prop('disabled', true);
+                $('.acf-field').css('opacity', '0.6');
             });
             </script>
             <?php
